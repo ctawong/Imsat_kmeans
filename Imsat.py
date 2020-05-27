@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 # Settings
 parser = argparse.ArgumentParser()
 parser.add_argument('--lr', default=0.002, type=float, help='learning rate')
-parser.add_argument('--batch_size', '-b', default=250, type=int, help='size of the batch during training')
+parser.add_argument('--batch_size', '-b', default=125, type=int, help='size of the batch during training')
 parser.add_argument('--lam', type=float, help='trade-off parameter for mutual information and smooth regularization',default=0.1)
 parser.add_argument('--mu', type=float, help='trade-off parameter for entropy minimization and entropy maximization',default=4)
 parser.add_argument('--prop_eps', type=float, help='epsilon', default=0.25)
