@@ -21,6 +21,7 @@ from sklearn.utils import linear_assignment_
 from sklearn.metrics import accuracy_score
 from munkres import Munkres, print_matrix
 import itertools
+import matplotlib.pyplot as plt
 
 # Settings
 parser = argparse.ArgumentParser()
@@ -30,12 +31,17 @@ parser.add_argument('--lam', type=float, help='trade-off parameter for mutual in
 parser.add_argument('--mu', type=float, help='trade-off parameter for entropy minimization and entropy maximization',default=4)
 parser.add_argument('--prop_eps', type=float, help='epsilon', default=0.25)
 parser.add_argument('--hidden_list', type=str, help='hidden size list', default='1200-1200')
-parser.add_argument('--n_epoch', type=int, help='number of epoches when maximizing', default=50)
+parser.add_argument('--hidden_final', type=int, help='size of final hidden state', default=1)
+parser.add_argument('--hidden_levels', type=int, help='Number of levels of a final hidden state', default=10)
+parser.add_argument('--n_epoch', type=int, help='number of epoches when maximizing', default=10)
 parser.add_argument('--dataset', type=str, help='which dataset to use', default='mnist')
 args = parser.parse_args()
+print(args)
 
 batch_size = args.batch_size
 hidden_list = args.hidden_list
+hidden_final = args.hidden_final
+hidden_levels = args.hidden_levels
 lr = args.lr
 n_epoch = args.n_epoch
 
@@ -62,12 +68,13 @@ class MyDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.MNIST)
 
-transform_train = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5,), (0.5,))])
+#transform_train = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5,), (0.5,))])
+transform_train = transforms.Compose([transforms.ToTensor()])
 trainset = MyDataset(root='./data', train=True, download=True, transform=transform_train)
 testset = MyDataset(root='./data', train=False, download=False, transform=transform_train)
-trainset = trainset + testset
+#trainset = trainset + testset
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
-testloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=2)
+testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
 tot_cl = 10
 
 # Deep Neural Network
@@ -80,7 +87,7 @@ class Net(nn.Module):
         self.fc2 = nn.Linear(1200, 1200)
         torch.nn.init.normal_(self.fc2.weight,std=0.1*math.sqrt(2/1200))
         self.fc2.bias.data.fill_(0)
-        self.fc3 = nn.Linear(1200, 10)
+        self.fc3 = nn.Linear(1200, hidden_final*hidden_levels)
         torch.nn.init.normal_(self.fc3.weight,std=0.0001*math.sqrt(2/1200))
         self.fc3.bias.data.fill_(0)
         self.bn1=nn.BatchNorm1d(1200, eps=2e-5)
@@ -124,7 +131,7 @@ def entropy(p):
 
 def Compute_entropy(net, x):
     # compute the entropy and the conditional entropy
-    p = F.softmax(net(x),dim=1)
+    p = F.softmax(net(x),dim=1)  # normalize to 1 for each sample
     p_ave = torch.sum(p, dim=0) / len(x)
     return entropy(p), entropy(p_ave)
 
@@ -136,7 +143,7 @@ def distance(y0, y1):
     # compute KL divergence between the outputs of the newtrok
     return kl(F.softmax(y0,dim=1), F.softmax(y1,dim=1))
 
-def vat(network, distance, x, eps_list, xi=10, Ip=1):
+def vat(network, distance, x, eps_list, xi=10, Ip=5):
     # compute the regularized penality [eq. (4) & eq. (6), 1]
     
     with torch.no_grad():
@@ -150,14 +157,16 @@ def vat(network, distance, x, eps_list, xi=10, Ip=1):
         d_var.requires_grad_(True)
         y_p = network(x + xi * d_var)
         kl_loss = distance(y,y_p)
+        #print(ip, kl_loss)
         kl_loss.backward(retain_graph=True)
         d = d_var.grad
         d = F.normalize(d, p=2, dim=1)
     d_var = d
     if use_cuda:
         d_var = d_var.to(device)
-    eps = args.prop_eps * eps_list
-    eps = eps.view(-1,1)
+    #eps = args.prop_eps * eps_list
+    eps = args.prop_eps * 10*torch.ones(x.shape).to(device)
+    #eps = eps.view(-1,1)
     y_2 = network(x + eps*d_var)
     return distance(y,y_2)
 
@@ -194,18 +203,36 @@ def compute_accuracy(y_pred, y_t):
     acc = np.sum(pred_corresp == y_t) / float(len(y_t))
     return acc
 
+from sklearn.cluster import KMeans
+def kmeans(x, n_clusters = 10):
+    km = KMeans(n_clusters = n_clusters, random_state=0, max_iter = 1000).fit(x)
+    return km.labels_    
 
+
+def plotAll(outputs, labels):
+    fig, ax = plt.subplots(nrows=2, ncols=5)
+    j = 0
+    for row in ax:
+        for col in row:
+            ind=labels.cpu().numpy() == j
+            col.plot(outputs.detach().cpu().numpy()[ind].transpose() )
+            col.title.set_text(j)
+            j += 1
+    fig.show()
+            
+        
 # Training
 print('==> Start training..')
 nearest_dist = torch.from_numpy(upload_nearest_dist(args.dataset))
 if use_cuda:
     nearest_dist = nearest_dist.to(device)
 best_acc = 0
+start_time = time.time()
 for epoch in range(n_epoch):
     net.train()
     running_loss = 0.0
-    #   start_time = time.clock()
-    for i, data in enumerate(trainloader, 0):
+    
+    for i, data in enumerate(trainloader):
         # get the inputs
         inputs, labels, ind = data
         inputs = inputs.view(-1, 28 * 28)
@@ -232,9 +259,9 @@ for epoch in range(n_epoch):
 
     # statistics
     net.eval()
-    p_pred = np.zeros((len(trainset),10))
-    y_pred = np.zeros(len(trainset))
-    y_t = np.zeros(len(trainset))
+    p_pred = np.zeros((len(testset),hidden_levels*hidden_final))
+    y_pred = np.zeros(len(testset))
+    y_t = np.zeros(len(testset))
     with torch.no_grad():
         for i, data in enumerate(testloader, 0):
             inputs, labels, ind = data
@@ -242,11 +269,12 @@ for epoch in range(n_epoch):
             if use_cuda:
                 inputs, labels = inputs.to(device), labels.to(device)
             outputs=F.softmax(net(inputs),dim=1)
-            y_pred[i*batch_size:(i+1)*batch_size]=torch.argmax(outputs,dim=1).cpu().numpy()
+            #y_pred[i*batch_size:(i+1)*batch_size]=kmeans(outputs.cpu().numpy() )
             p_pred[i*batch_size:(i+1)*batch_size,:]=outputs.detach().cpu().numpy()
             y_t[i*batch_size:(i+1)*batch_size]=labels.cpu().numpy()
+    y_pred = kmeans(p_pred)
     acc = compute_accuracy(y_pred, y_t)
-    print("epoch: ", epoch+1, "\t total lost = {:.4f} " .format(running_loss/(i+1)), "\t MI = {:.4f}" .format(normalized_mutual_info_score(y_t, y_pred)), "\t acc = {:.4f} " .format(acc))
+    print("epoch: ", epoch+1, "\t total lost = {:.4f} " .format(running_loss/(i+1)), "\t MI = {:.4f}" .format(normalized_mutual_info_score(y_t, y_pred)), "\t acc = {:.4f} " .format(acc), "\t time = {:.0f} " .format(time.time()-start_time))
 
     # save the "best" parameters
     if acc > best_acc:
